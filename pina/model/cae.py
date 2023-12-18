@@ -7,6 +7,18 @@ class CAE(nn.Module):
                 latent_dimension,
                 encoder_kwargs,
                 decoder_kwargs):
+        """Construct Convolutional AutoEncoder
+
+        :param full_dimension: dimension of the origin space
+        :param latent_dimension: dimension of the latent space
+        :param encoder_kwargs: list of dictionaries with parameters for convolutional layers in the encoder.
+        :param decoder_kwargs: list of dictionaries with parameters for convolutional layers in the decoder.
+
+        .. note:: 
+            Each layer requires one dictionary (which is indeed annoying and will possibly be modified).
+            The user is responsible for the tuning of parameters so that the output dimension of the decoder
+            is the same as the input dimension of the encoder.
+        """
         
         super().__init__()
 
