@@ -10,8 +10,11 @@ class CAE(nn.Module):
         
         super().__init__()
 
+        self.full_dimension = full_dimension
+        self.latent_dimension = latent_dimension
+
         self._encoder = Encoder(full_dimension, latent_dimension, *encoder_kwargs)
-        self._decoder = Decoder(full_dimension, latent_dimension, *decoder_kwargs)
+        self._decoder = Decoder(full_dimension, self._encoder._after_conv_size, latent_dimension, *decoder_kwargs)
 
     def forward(self,x):
         x = self.encoder(x)
@@ -53,7 +56,7 @@ class Encoder(nn.Module):
             layers_functions.append(layer)
             layers_functions.append(nn.ELU())
 
-        self.cnn = nn.Sequential(layers_functions)
+        self.cnn = nn.Sequential(*layers_functions)
 
     def forward(self,x):
         return self.cnn(x)
@@ -72,7 +75,7 @@ class Decoder(nn.Module):
 
         current_size = intermediate_dim
         for args in conv_kwargs:
-            layers.append(nn.Conv1d(**args))
+            layers.append(nn.ConvTranspose1d(**args))
 
             padding = args['padding']
             dilation = args['dilation']
@@ -88,7 +91,7 @@ class Decoder(nn.Module):
             layers_functions.append(nn.ELU())
         layers_functions.append(layers[-1])
 
-        self.cnn = nn.Sequential(layers_functions)
+        self.cnn = nn.Sequential(*layers_functions)
 
 
 
