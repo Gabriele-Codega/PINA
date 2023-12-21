@@ -1,5 +1,13 @@
 import torch.nn as nn
+import torch
 import math
+
+## BUG: the Flatten layer in the Encoder only works with batched data.
+# Reason is that it tries to flatten starting from dim=1, which only makes
+# sense if the data is batched (i.e. 3dimensional).
+# Workaround: pass a single input as a slice, i.e cae(u[:1,:,:]) would ideally be
+# cae(u[0,:,:]).
+
 
 class CAE(nn.Module):
     def __init__(self,
@@ -29,8 +37,23 @@ class CAE(nn.Module):
         self._decoder = Decoder(full_dimension, self._encoder._after_conv_size, latent_dimension, *decoder_kwargs)
 
     def forward(self,x):
-        x = self.encoder(x)
-        return self.decoder(x)
+        # Check to see if in the case where we have u(t),u(t+1).
+        # Only works for batched input, because if the input is not batched
+        # the size would still be 3 but the first dimension is treated as batch size
+        # and the whole thing breaks
+        shape = list(x.size())
+        if (len(shape) == 4):
+            n = shape[1]
+            output_ = []
+            for i in range(n):
+                y = self.encoder(x[:,i,...])
+                y = self.decoder(y)
+                output_.append(y)
+            output = torch.stack(output_,dim=1)
+        else:
+            x = self.encoder(x)
+            output = self.decoder(x)
+        return output
     
     @property
     def encoder(self):

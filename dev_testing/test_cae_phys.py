@@ -5,6 +5,8 @@
 
 """
 
+import torch
+from Burgers_DiscreteTorch_Class import Burgers_Discrete
 from pina.model import CAE
 from pina.problem import SpatialProblem,TimeDependentProblem
 from pina.solvers import PINN
@@ -19,7 +21,6 @@ from torchinfo import summary
 from scipy.io import loadmat
 import numpy as np
 import matplotlib.pyplot as plt
-import torch
 
 ## load the data
 data = loadmat("Burgers_FOM.mat")
@@ -36,8 +37,8 @@ x_dom = [L[0], L[-1]]
 t_dom = [t[0], t[-1]]
 
 ## making L and t LabelTensors as required by PINA
-L = LabelTensor(L,'x')
-t = LabelTensor(t,'t')
+L_tens = LabelTensor(L,'x')
+t_tens = LabelTensor(t,'t')
 
 ## train test split
 # train size is 80% of data
@@ -50,16 +51,18 @@ train,test = torch.utils.data.random_split(range(nt),[train_size,test_size],gene
 u_train = torch.Tensor(u[train.indices,:])
 u_test = torch.Tensor(u[test.indices,:])
 
-
 ## rehaping u to have 1 channel, as required by Conv1D
 ## also making u a LabelTensor as reuqired by PINA
 u = u.reshape((nt,1,nx))
 u_train = u_train.reshape((train_size,1,nx))
 u_test = u_test.reshape((test_size,1,nx))
+u_stack = torch.stack([u_train[:train_size-1,...],u_train[1:,...]],dim=1)
 labels = [f'u{i}' for i in range(u.shape[-1])]
 u = LabelTensor(u,labels)
 u_train = LabelTensor(u_train,labels)
 u_test = LabelTensor(u_test,labels)
+u_stack = LabelTensor(u_stack,labels)
+
 
 
 ## lists of dictionaries with parameters to build autoencoder layers.
@@ -77,6 +80,8 @@ dec_args = [{'in_channels':32,'out_channels':16,'kernel_size':3,'stride':1,'padd
 
 cae = CAE(30,8,en_args,dec_args)
 
+
+
 ## defining the (Physics Informed) Model Order Reduction problem
 class PIMOR(SpatialProblem,TimeDependentProblem):
     # domain definition is required as they are abstractmethods
@@ -87,20 +92,35 @@ class PIMOR(SpatialProblem,TimeDependentProblem):
     input_variables = labels
     output_variables = labels
 
-    # dummy, meaningless equation to test the handling of 'physics based' loss.
-    def dummy_eq(input_,output_):
-        u_sq = torch.sum(input_ * input_,dim=-1)
-        ur_sq = torch.sum(output_ * output_,dim=-1)
-        return u_sq - ur_sq
+
+    def Burgers(input_,output_):
+        ## BEWARE: crazy shenanigans here!
+        # What happens here is extremely inefficient and hence unbearably slow.
+        # problem is that we want to work with batched input but the Burgers_Discrete class does not
+        # support any kind of batches. The solution is to iterate over the elements of the batch
+        # and compute the residual for each of them, after converting them from LabelTensor to Tensor. 
+        # The residuals are stored in a list which is then converted to a tensor and returned.
+        # The reason is that then PINA uses the return value of the function to 
+        # compute the solver's loss, which requires a tensor as input.
+        # I am not even 100% sure this is working and moreover it probably won't work for unbatched input
+        # (see the CAE class itself for more sketchy code)
+        shape = list(output_.size())
+        n = shape[0]
+        res_ = []
+        for i in range(n):
+            bd = Burgers_Discrete(L,t,0.1,output_[i,0,...].tensor,output_[i,1,...].tensor)
+            res = bd.Burgers_Residual()
+            res_.append(res)
+        batch_residual = torch.stack(res_,dim=0)
+        return batch_residual
 
     # We can pass points from the spatial/temporal/spatio-temporal domain
     # as LabelTensors with something like `Condition(input_points=pts, equation=Burgers)`.
     # This way we do not actually need to sample the domains and we do not necessarily 
     # have to work with the pairs (x,t) which would come from PINA internals.
 
-    # to use the dummy physics based loss, add this term to the conditions dictionary:
-    # 'dum': Condition(input_pints=u_train,equation=Equation(dummy_eq))
-    conditions = {'data': Condition(input_points=u_train,output_points = u_train)}
+    conditions = {'phys': Condition(input_points=u_stack,equation=Equation(Burgers)),
+                  't_0': Condition(input_points=u[:1,:,:],output_points=u[:1,:,:])}
 
 rom = PIMOR()
 
@@ -114,11 +134,11 @@ trainer = Trainer(solver,batch_size=20,max_epochs=150,callbacks = [MetricTracker
 
 
 trainer.train()
-torch.save(cae, 'pinn_cae.pt')
+torch.save(cae, 'pinn_cae_burger_loss.pt')
 
 
 ## plot losses
 plotter = Plotter()
-plotter.plot_loss(trainer,metrics='mean_loss',label='mean_loss',logy=True)
+plotter.plot_loss(trainer,label='mean_loss',logy=True)
 
 plt.show()
