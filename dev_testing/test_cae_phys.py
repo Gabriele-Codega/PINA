@@ -51,19 +51,39 @@ train,test = torch.utils.data.random_split(range(nt),[train_size,test_size],gene
 u_train = torch.Tensor(u[train.indices,:])
 u_test = torch.Tensor(u[test.indices,:])
 
+# stacking u so that to have a tensor with entries u_t, u_(t+1)
+u_stack = torch.stack([torch.Tensor(u)[:nt-1,...],torch.Tensor(u)[1:,...]],dim=1)
+u_stack_train = torch.Tensor(u_stack[train.indices,...])
+
 ## rehaping u to have 1 channel, as required by Conv1D
 ## also making u a LabelTensor as reuqired by PINA
 u = u.reshape((nt,1,nx))
+u_stack = u_stack.reshape((nt-1,2,1,nx))
+u_stack_train = u_stack_train.reshape((train_size,2,1,nx))
 u_train = u_train.reshape((train_size,1,nx))
 u_test = u_test.reshape((test_size,1,nx))
-u_stack = torch.stack([u_train[:train_size-1,...],u_train[1:,...]],dim=1)
 labels = [f'u{i}' for i in range(u.shape[-1])]
 u = LabelTensor(u,labels)
 u_train = LabelTensor(u_train,labels)
 u_test = LabelTensor(u_test,labels)
 u_stack = LabelTensor(u_stack,labels)
+u_stack_train = LabelTensor(u_stack_train,labels)
 
+# print('running sanity check...')
+# print(u_stack.size())
+# db = Burgers_Discrete(L,t,0.1,u_stack[:,0,0,:].tensor,u_stack[:,1,0,:].tensor)
+# print(db.nx)
+# print(db.nt)
+# print(db.batch_size)
+# print(db.um1.size())
+# print(db.up1.size())
 
+# res = db.Burgers_Residual()
+# img = plt.imshow(res)
+# plt.colorbar(img)
+# plt.show()
+# print('done')
+# exit()
 
 ## lists of dictionaries with parameters to build autoencoder layers.
 ## TODO: implement a less tedious way to handle the construction of layers
@@ -104,23 +124,37 @@ class PIMOR(SpatialProblem,TimeDependentProblem):
         # compute the solver's loss, which requires a tensor as input.
         # I am not even 100% sure this is working and moreover it probably won't work for unbatched input
         # (see the CAE class itself for more sketchy code)
-        shape = list(output_.size())
-        n = shape[0]
-        res_ = []
-        for i in range(n):
-            bd = Burgers_Discrete(L,t,0.1,output_[i,0,...].tensor,output_[i,1,...].tensor)
-            res = bd.Burgers_Residual()
-            res_.append(res)
-        batch_residual = torch.stack(res_,dim=0)
+        # shape = list(output_.size())
+        # n = shape[0]
+        # res_ = []
+        # for i in range(n):
+        #     bd = Burgers_Discrete(L,t,0.1,output_[i,0,...].tensor,output_[i,1,...].tensor)
+        #     res = bd.Burgers_Residual()
+        #     res_.append(res)
+        # batch_residual = torch.stack(res_,dim=0)
+
+        # this is presumably correct and faster, after modifying the Burgers_Discrete to allow batched input
+        bd = Burgers_Discrete(L,t,0.1,output_[:,0,0,:].tensor,output_[:,1,0,:].tensor)
+        batch_residual = bd.Burgers_Residual()
         return batch_residual
+    
+    def top_boundary(input_,output_):
+        val = output_.tensor[...,-1]
+        return val
+    
+    def bot_boundary(input_,output_):
+        val = output_.tensor[...,0]
+        return val
 
     # We can pass points from the spatial/temporal/spatio-temporal domain
     # as LabelTensors with something like `Condition(input_points=pts, equation=Burgers)`.
     # This way we do not actually need to sample the domains and we do not necessarily 
     # have to work with the pairs (x,t) which would come from PINA internals.
 
-    conditions = {'phys': Condition(input_points=u_stack,equation=Equation(Burgers)),
-                  't_0': Condition(input_points=u[:1,:,:],output_points=u[:1,:,:])}
+    conditions = {'phys': Condition(input_points=u_stack_train,equation=Equation(Burgers)),
+                  't_0': Condition(input_points=u[:1,:,:],output_points=u[:1,:,:]),
+                  'x0': Condition(input_points=u_stack_train,equation=Equation(top_boundary)),
+                  'x1': Condition(input_points=u_stack_train,equation=Equation(bot_boundary))}
 
 rom = PIMOR()
 
@@ -129,12 +163,13 @@ solver = PINN(problem=rom,
               model=cae,
               optimizer=torch.optim.Adam,
               optimizer_kwargs={'lr':0.001},
-              scheduler_kwargs={'factor':0.5})
+              scheduler=torch.optim.lr_scheduler.ConstantLR,
+              scheduler_kwargs={'factor':0.5,'total_iters':5})
 trainer = Trainer(solver,batch_size=20,max_epochs=150,callbacks = [MetricTracker()])
 
 
 trainer.train()
-torch.save(cae, 'pinn_cae_burger_loss.pt')
+torch.save(cae, 'pinn_cae_burger_loss2.pt')
 
 
 ## plot losses

@@ -5,7 +5,9 @@ Author: Rahul Halder
 import numpy as np
 import torch
 
-
+## IMPORTANT: check correctness of the results.
+# should be correct, checked by evaluating the residual on the training set
+# with no pass to the autoencoder.
 class Burgers_Discrete:
      
      def __init__(self,L,T,mu,um1,up1):
@@ -15,8 +17,10 @@ class Burgers_Discrete:
          self.mu = mu
          self.L = L
          self.T = T
-         self.um1 = um1.T
-         self.up1 = up1.T
+         # modify to accept batched input
+         self.batch_size = um1.size(dim=0)
+         self.um1 = um1.reshape((self.batch_size,self.nx))
+         self.up1 = up1.reshape((self.batch_size,self.nx))
          self.dx = self.L[1]-self.L[0]
          self.dt = self.T[1]-self.T[0] 
          self.const = (self.mu/(self.dx*self.dx))
@@ -36,15 +40,15 @@ class Burgers_Discrete:
           return A_tensor
       
      def Compute_NonlinearMat(self):
-         
-         F = torch.zeros((self.nx, self.nx))
+         # one matrix F for each vector in batch
+         F = torch.zeros((self.batch_size,self.nx, self.nx))
          for i in range(1,self.nx-1):
              
              if (i == self.nx-2) :
-                F[i,i] = -self.um1[i]
+                F[:,i,i] = -self.um1[:,i]
              else:
-                F[i,i+1]= self.um1[i]
-                F[i,i]=  -self.um1[i]
+                F[:,i,i+1]= self.um1[:,i]
+                F[:,i,i]=  -self.um1[:,i]
          
          return F
 
@@ -54,7 +58,8 @@ class Burgers_Discrete:
      def Burgers_Residual_Spatial(self):
          Alin =  self.Compute_LinearMat()
          Fnonlin = self.Compute_NonlinearMat()
-         return - self.const*torch.matmul(Alin,self.um1)+(1.0/self.dx)*torch.matmul(Fnonlin,self.um1) 
+         # using einsum to perform matrix products in batches
+         return - self.const*torch.einsum('ij,bj->bi',Alin,self.um1)+(1.0/self.dx)*torch.einsum('bij,bj->bi',Fnonlin,self.um1)
          
       
      def Burgers_Residual(self):
