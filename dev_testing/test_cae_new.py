@@ -18,6 +18,7 @@ import torch
 
 from scipy.io import loadmat
 
+import matplotlib.pyplot as plt
 
 data = loadmat("Burgers_FOM.mat")
 u = data['u_Mat'].T # (nt,nx)
@@ -63,10 +64,15 @@ class TimeSeriesDataset(Dataset):
         return len(self.data)-1
     
     def __getitem__(self, index):
-        return torch.cat((self.data[index],self.data[index+1]),0)
+        return torch.stack((self.data[index],self.data[index+1]))
+        #return self.data[index]
 
 trainData = TimeSeriesDataset(u_train[:,None,:])
 
+trainDataTensor = torch.zeros((len(trainData),2,1,30))
+for i in range(len(trainData)):
+    trainDataTensor[i,...] = trainData[i]
+trainDataTensor = LabelTensor(trainDataTensor,labels)
 
 # matrices for linear and nonlinear part
 mu = 0.1
@@ -81,6 +87,10 @@ B = torch.diag(torch.tensor(Bdiags[0]),0)
 B += torch.diag(torch.tensor(Bdiags[1]),1)
 B = B/dx
 
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+A = A.to(device)
+B = B.to(device)
+
 # define the problem
 class MOR(AbstractProblem):
     input_variables = labels
@@ -89,8 +99,9 @@ class MOR(AbstractProblem):
     # presumably good enough, still not super accurate for some reason
     # also likely very slow with the for loop. might be able to speed it up 
     # with some pytorch shenanigans
-    @staticmethod
-    def physLoss(_x,_y):
+    def physLoss(_input,_output):
+        _x = _output.tensor[0,...].squeeze()
+        _y = _output.tensor[1,...].squeeze()
         res = torch.zeros((len(_x),nx))
         for i,(x,y) in enumerate(zip(_x,_y)):
             Bloc = x[:,None]*B
@@ -101,11 +112,21 @@ class MOR(AbstractProblem):
         
         return res
     
-    conditions = {'phys':Condition(input_points=u_train,equation=Equation(physLoss))}
+    def top_boundary(_input,_output):
+        val = _output.tensor[...,-1]
+        return val
+    
+    def bot_boundary(_input,_output):
+        val = _output.tensor[...,0]
+        return val
+
+    conditions = {'phys':Condition(input_points=trainDataTensor,equation=Equation(physLoss)),
+                    't0': Condition(input_points=trainDataTensor[:1,0,:,:],output_points=trainDataTensor[:1,0,:,:]),
+                  'x0': Condition(input_points=trainDataTensor,equation=Equation(top_boundary)),
+                  'x1': Condition(input_points=trainDataTensor,equation=Equation(bot_boundary))}
     # define the burgers error
 
 
-# loader = iter(DataLoader(trainData,batch_size=2))
 
 problem = MOR()
 
@@ -123,13 +144,43 @@ dec_args = [{'in_channels':32,'out_channels':16,'kernel_size':3,'stride':1,'padd
 
 cae = CAE(30,8,en_args,dec_args)
 
-solver = PINN(problem,cae)
+solver = PINN(problem,
+                cae,
+                optimizer=torch.optim.Adam,
+                optimizer_kwargs={'lr':0.001},
+                scheduler=torch.optim.lr_scheduler.ConstantLR,
+                scheduler_kwargs={'factor':0.5,'total_iters':5})
 
-trainer = Trainer(solver,batch_size=20,max_epochs=1000,callbacks = [MetricTracker()],accelerator="auto")
-print(trainData[0].size())
-# print(cae(trainData[0]))
+loader = iter(DataLoader(trainData,batch_size=20))
+trainer = Trainer(solver,
+                batch_size=20,
+                max_epochs=1000,
+                callbacks = [MetricTracker()],accelerator="auto")
+#print(type(next(loader)))
+# print(next(loader).size())
+#print(cae(next(loader)))
 
 # train
-# trainer.train()
-# torch.save(cae,"model_new.pt")
+trainer.train()
+torch.save(cae,"model_new.pt")
 
+pred = cae(torch.tensor(u.reshape((nt,1,nx)),dtype=torch.float)).detach().numpy().reshape((nt,nx))
+print(u.shape)
+print(pred.shape)
+
+fig = plt.figure(figsize=(10,6))
+ax1 = fig.add_subplot(121)
+real_plt = ax1.imshow(u.T,extent=[t[0],t[-1],L[0],L[-1]])
+ax1.set_aspect(0.25)
+ax1.set_title('Real')
+ax1.set_xlabel('t')
+fig.colorbar(real_plt)
+
+ax2 = fig.add_subplot(122)
+rec_plt = ax2.imshow(pred.T,extent=[t[0],t[-1],L[0],L[-1]])
+ax2.set_aspect(0.25)
+ax2.set_title('Autoencoder')
+ax2.set_xlabel('t')
+fig.colorbar(rec_plt)
+
+plt.show()

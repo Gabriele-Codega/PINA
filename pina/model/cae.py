@@ -41,15 +41,17 @@ class CAE(nn.Module):
         # Only works for batched input, because if the input is not batched
         # the size would still be 3 but the first dimension is treated as batch size
         # and the whole thing breaks
-        shape = list(x.size())
+        
+        shape = list(x.size()) if isinstance(x,torch.Tensor) else list(x.shape)
         if (len(shape) == 4):
             n = shape[1]
             output_ = []
             for i in range(n):
-                y = self.encoder(x[:,i,...])
+                #print(x.tensor[:,i,...])
+                y = self.encoder(x.tensor[:,i,...])
                 y = self.decoder(y)
                 output_.append(y)
-            output = torch.stack(output_,dim=1)
+            output = torch.stack(output_)
         else:
             x = self.encoder(x)
             output = self.decoder(x)
