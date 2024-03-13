@@ -19,8 +19,12 @@ import torch
 from scipy.io import loadmat
 
 import matplotlib.pyplot as plt
+from copy import deepcopy
 
-data = loadmat("Burgers_FOM.mat")
+# ----------------------------------------------- 
+# ------------ PREPROCESSING DATA ---------------
+# ----------------------------------------------- 
+data = loadmat("Burgers_FOM.mat") 
 u = data['u_Mat'].T # (nt,nx)
 nt = u.shape[0] 
 nx = u.shape[1]
@@ -30,6 +34,17 @@ t = data['time'] # (nt,1)
 t = t.reshape(nt)
 dx = L[1]-L[0]
 dt = t[1]-t[0]
+
+u_cpy = deepcopy(u)
+
+# sparsifying the input field by keeping every 5 values of u (keeping the first and last as well) and filling the rest with x
+u[:,1:5] = L[1:5]
+u[:,6:10] = L[6:10]
+u[:,11:15] = L[11:15]
+u[:,16:20] = L[16:20]
+u[:,21:25] = L[21:25]
+u[:,26:29] = L[26:29]
+
 
 ## getting domain boundaries to define the domain in the PINA problem
 x_dom = [L[0], L[-1]]
@@ -53,6 +68,10 @@ u_test = torch.Tensor(u[train_size:,:])
 u_train = LabelTensor(u_train,labels)
 u_test = LabelTensor(u_test,labels)
 
+# ----------------------------------------------- 
+# ----------------------------------------------- 
+
+
 # define the dataset
 class TimeSeriesDataset(Dataset):
     def __init__(self,dataTensor) -> None:
@@ -73,6 +92,9 @@ trainDataTensor = torch.zeros((len(trainData),2,1,30))
 for i in range(len(trainData)):
     trainDataTensor[i,...] = trainData[i]
 trainDataTensor = LabelTensor(trainDataTensor,labels)
+
+u0 = torch.tensor(u_cpy[0,:],dtype=torch.float).reshape((1,1,nx))
+u0 = LabelTensor(u0,labels)
 
 # matrices for linear and nonlinear part
 mu = 0.1
@@ -121,7 +143,7 @@ class MOR(AbstractProblem):
         return val
 
     conditions = {'phys':Condition(input_points=trainDataTensor,equation=Equation(physLoss)),
-                    't0': Condition(input_points=trainDataTensor[:1,0,:,:],output_points=trainDataTensor[:1,0,:,:]),
+                    't0': Condition(input_points=trainDataTensor[:1,0,:,:],output_points=u0),
                   'x0': Condition(input_points=trainDataTensor,equation=Equation(top_boundary)),
                   'x1': Condition(input_points=trainDataTensor,equation=Equation(bot_boundary))}
     # define the burgers error
@@ -148,21 +170,25 @@ solver = PINN(problem,
                 cae,
                 optimizer=torch.optim.Adam,
                 optimizer_kwargs={'lr':0.001},
-                scheduler=torch.optim.lr_scheduler.ConstantLR,
-                scheduler_kwargs={'factor':0.5,'total_iters':5})
+                scheduler=torch.optim.lr_scheduler.StepLR,
+                scheduler_kwargs={'gamma':0.5,'step_size':500})
 
 loader = iter(DataLoader(trainData,batch_size=20))
 trainer = Trainer(solver,
                 batch_size=20,
-                max_epochs=1000,
+                max_epochs=5000,
                 callbacks = [MetricTracker()],accelerator="auto")
 #print(type(next(loader)))
 # print(next(loader).size())
 #print(cae(next(loader)))
 
 # train
-trainer.train()
-torch.save(cae,"model_new.pt")
+try:
+    trainer.train()
+except KeyboardInterrupt:
+    torch.save(cae,"model_new_sparse.pt")
+#torch.save(cae,"model_new.pt")
+#torch.save(cae,"model_new_sparse.pt")
 
 pred = cae(torch.tensor(u.reshape((nt,1,nx)),dtype=torch.float)).detach().numpy().reshape((nt,nx))
 print(u.shape)
@@ -170,7 +196,7 @@ print(pred.shape)
 
 fig = plt.figure(figsize=(10,6))
 ax1 = fig.add_subplot(121)
-real_plt = ax1.imshow(u.T,extent=[t[0],t[-1],L[0],L[-1]])
+real_plt = ax1.imshow(u_cpy.T,extent=[t[0],t[-1],L[0],L[-1]])
 ax1.set_aspect(0.25)
 ax1.set_title('Real')
 ax1.set_xlabel('t')
