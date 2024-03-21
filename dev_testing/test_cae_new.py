@@ -15,6 +15,7 @@ from pina.callbacks import MetricTracker
 from torch.utils.data import Dataset,DataLoader
 
 import torch
+from pytorch_lightning.callbacks import Callback
 
 from scipy.io import loadmat
 
@@ -45,6 +46,7 @@ u[:,16:20] = L[16:20]
 u[:,21:25] = L[21:25]
 u[:,26:29] = L[26:29]
 
+u = torch.tensor(L[None,:]+t[:,None])
 
 ## getting domain boundaries to define the domain in the PINA problem
 x_dom = [L[0], L[-1]]
@@ -91,7 +93,7 @@ trainData = TimeSeriesDataset(u_train[:,None,:])
 trainDataTensor = torch.zeros((len(trainData),2,1,30))
 for i in range(len(trainData)):
     trainDataTensor[i,...] = trainData[i]
-trainDataTensor = LabelTensor(trainDataTensor,labels)
+trainDataTensor = LabelTensor(trainDataTensor[:100,...],labels)
 
 u0 = torch.tensor(u_cpy[0,:],dtype=torch.float).reshape((1,1,nx))
 u0 = LabelTensor(u0,labels)
@@ -112,6 +114,23 @@ B = B/dx
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 A = A.to(device)
 B = B.to(device)
+trainDataTensor = trainDataTensor.to(device)
+
+# --------------------------------------
+# define the model
+# encoder parameters
+en_args = [{'in_channels':1,'out_channels':4,'kernel_size':3,'stride':1,'padding':0,'dilation':1},
+           {'in_channels':4,'out_channels':8,'kernel_size':3,'stride':1,'padding':1,'dilation':1},
+           {'in_channels':8,'out_channels':16,'kernel_size':3,'stride':1,'padding':1,'dilation':1},
+           {'in_channels':16,'out_channels':32,'kernel_size':3,'stride':1,'padding':1,'dilation':1}]
+# decoder parameters
+dec_args = [{'in_channels':32,'out_channels':16,'kernel_size':3,'stride':1,'padding':1,'dilation':1,'output_padding':0},
+           {'in_channels':16,'out_channels':8,'kernel_size':3,'stride':1,'padding':1,'dilation':1,'output_padding':0},
+           {'in_channels':8,'out_channels':4,'kernel_size':3,'stride':1,'padding':1,'dilation':1,'output_padding':0},
+           {'in_channels':4,'out_channels':1,'kernel_size':3,'stride':1,'padding':0,'dilation':1,'output_padding':0}]
+
+cae = CAE(30,8,en_args,dec_args)
+# -------------------------------------
 
 # define the problem
 class MOR(AbstractProblem):
@@ -124,6 +143,7 @@ class MOR(AbstractProblem):
     def physLoss(_input,_output):
         _x = _output.tensor[0,...].squeeze()
         _y = _output.tensor[1,...].squeeze()
+        # print(_x)
         res = torch.zeros((len(_x),nx))
         for i,(x,y) in enumerate(zip(_x,_y)):
             Bloc = x[:,None]*B
@@ -142,29 +162,29 @@ class MOR(AbstractProblem):
         val = _output.tensor[...,0]
         return val
 
-    conditions = {'phys':Condition(input_points=trainDataTensor,equation=Equation(physLoss)),
-                    't0': Condition(input_points=trainDataTensor[:1,0,:,:],output_points=u0),
-                  'x0': Condition(input_points=trainDataTensor,equation=Equation(top_boundary)),
-                  'x1': Condition(input_points=trainDataTensor,equation=Equation(bot_boundary))}
+    _in_pts = trainDataTensor
+    @property
+    def in_pts(self):
+        return self._in_pts
+    @in_pts.setter
+    def in_pts(self,data):
+        self._in_pts = data
+
+
+    conditions = {'phys':Condition(input_points=_in_pts,equation=Equation(physLoss)),
+                   't0': Condition(input_points=_in_pts[:1,0,:,:],output_points=u0),
+                   'x0': Condition(input_points=_in_pts,equation=Equation(top_boundary)),
+                   'x1': Condition(input_points=_in_pts,equation=Equation(bot_boundary))}
     # define the burgers error
 
 
 
 problem = MOR()
+problem.in_pts = trainDataTensor
 
-# define the model
-# encoder parameters
-en_args = [{'in_channels':1,'out_channels':4,'kernel_size':3,'stride':1,'padding':0,'dilation':1},
-           {'in_channels':4,'out_channels':8,'kernel_size':3,'stride':1,'padding':1,'dilation':1},
-           {'in_channels':8,'out_channels':16,'kernel_size':3,'stride':1,'padding':1,'dilation':1},
-           {'in_channels':16,'out_channels':32,'kernel_size':3,'stride':1,'padding':1,'dilation':1}]
-# decoder parameters
-dec_args = [{'in_channels':32,'out_channels':16,'kernel_size':3,'stride':1,'padding':1,'dilation':1,'output_padding':0},
-           {'in_channels':16,'out_channels':8,'kernel_size':3,'stride':1,'padding':1,'dilation':1,'output_padding':0},
-           {'in_channels':8,'out_channels':4,'kernel_size':3,'stride':1,'padding':1,'dilation':1,'output_padding':0},
-           {'in_channels':4,'out_channels':1,'kernel_size':3,'stride':1,'padding':0,'dilation':1,'output_padding':0}]
-
-cae = CAE(30,8,en_args,dec_args)
+class update_input(Callback):
+    def on_train_epoch_end(self,trainer,pl_module):
+        problem.in_pts = LabelTensor(pl_module(problem.in_pts).detach(),labels)
 
 solver = PINN(problem,
                 cae,
@@ -173,40 +193,51 @@ solver = PINN(problem,
                 scheduler=torch.optim.lr_scheduler.StepLR,
                 scheduler_kwargs={'gamma':0.5,'step_size':500})
 
-loader = iter(DataLoader(trainData,batch_size=20))
+# loader = iter(DataLoader(trainData,batch_size=20))
 trainer = Trainer(solver,
                 batch_size=20,
-                max_epochs=5000,
-                callbacks = [MetricTracker()],accelerator="auto")
+                max_epochs=1,
+                callbacks = [MetricTracker(),update_input()],accelerator="auto")
 #print(type(next(loader)))
 # print(next(loader).size())
 #print(cae(next(loader)))
-
+print(problem.in_pts.tensor.size())
+print(problem.in_pts.tensor[0,...].cpu())
 # train
 try:
     trainer.train()
 except KeyboardInterrupt:
-    torch.save(cae,"model_new_sparse.pt")
+    torch.save(cae,"model_new_sparse_rec.pt")
 #torch.save(cae,"model_new.pt")
-#torch.save(cae,"model_new_sparse.pt")
+torch.save(cae,"model_new_sparse_rec.pt")
 
-pred = cae(torch.tensor(u.reshape((nt,1,nx)),dtype=torch.float)).detach().numpy().reshape((nt,nx))
-print(u.shape)
-print(pred.shape)
+print(problem.in_pts.tensor.size())
+print(problem.in_pts.tensor[0,...].cpu())
+pred = cae(torch.tensor(u_cpy.reshape((nt,1,nx)),dtype=torch.float)).detach().numpy().reshape((nt,nx))
+# print(u.shape)
+# print(pred.shape)
 
 fig = plt.figure(figsize=(10,6))
-ax1 = fig.add_subplot(121)
+ax1 = fig.add_subplot(221)
 real_plt = ax1.imshow(u_cpy.T,extent=[t[0],t[-1],L[0],L[-1]])
 ax1.set_aspect(0.25)
 ax1.set_title('Real')
 ax1.set_xlabel('t')
 fig.colorbar(real_plt)
 
-ax2 = fig.add_subplot(122)
+ax2 = fig.add_subplot(222)
 rec_plt = ax2.imshow(pred.T,extent=[t[0],t[-1],L[0],L[-1]])
 ax2.set_aspect(0.25)
 ax2.set_title('Autoencoder')
 ax2.set_xlabel('t')
 fig.colorbar(rec_plt)
+
+ax3 = fig.add_subplot(223)
+rec_plt = ax3.imshow(problem.in_pts.tensor[:,0,...].cpu().numpy().reshape((-1,nx)).T,extent=[t[0],t[-1],L[0],L[-1]])
+ax3.set_aspect(0.25)
+ax3.set_title('in pts')
+ax3.set_xlabel('t')
+fig.colorbar(rec_plt)
+
 
 plt.show()
